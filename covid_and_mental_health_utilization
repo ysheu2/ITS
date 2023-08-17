@@ -1,0 +1,798 @@
+import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import scipy as sp
+import statsmodels.api as sm
+import statsmodels.formula.api as smf
+import statsmodels.tsa.stattools
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.arima.model import ARIMA
+import pmdarima as pm
+from statsmodels.tsa.seasonal import seasonal_decompose
+import sidetable
+from statsmodels.tsa.stattools import adfuller
+import os
+import matplotlib.dates as mdates
+
+# val = 1 MHC, val != 1 MED
+val = 0
+
+# load csv to dataframe
+if val == 1:
+    df = pd.read_csv('export_mhc_june2022.csv')
+    print('df is MHC')
+else:
+    df = pd.read_csv('export_med_june2022.csv')
+    print('df is MED')
+
+# report number of total encounters or patients before filter applied
+print('number of total encounter=', len(df.drop_duplicates(subset='PAT_ENC_CSN_ID', keep='first')))
+print('number of total patients=', len(df.drop_duplicates(subset='PAT_ID', keep='first')))
+
+# filter people with a mental health dx or mental health prescription
+if val == 1:
+    df = df.loc[(df['MHC_FLG'] >= 1)]
+    print('MHC_FLG=1')
+else:
+    df = df.loc[(df['MED_FLG'] >= 1)]
+    print('MED_FLG=1')
+
+# convert encounter date to dateline format
+df['ENC_CONTACT'] = pd.to_datetime(df['ENC_CONTACT'], format='%Y-%m-%d')
+df['day_of_week'] = df['ENC_CONTACT'].dt.dayofweek
+df['Week'] = df['ENC_CONTACT'].dt.isocalendar().week
+df['Year'] = df['ENC_CONTACT'].dt.isocalendar().year
+df['week_num'] = df['Week'] + (df['Year'] - df['Year'].min()) * 52
+
+# Add columns of diagnosis, age group (at the time of study or encounter)
+df['diagnosis'] = 'Other_dx'
+df.loc[(df['ANXIETY'] >= 1) & (df['DEPRESSION'] == 0) & (df['MOOD_DIS'] == 0) & (df['PSYCHOTIC_DIS'] == 0) & (
+        df['ADHD'] == 0), 'diagnosis'] = 'ANX_ONLY'
+df.loc[(df['ANXIETY'] == 0) & (df['DEPRESSION'] >= 1) | (df['MOOD_DIS'] >= 1) & (df['PSYCHOTIC_DIS'] == 0) & (
+        df['ADHD'] == 0), 'diagnosis'] = 'MD_ONLY'
+df.loc[(df['ANXIETY'] >= 1) & ((df['DEPRESSION'] >= 1) | (df['MOOD_DIS'] >= 1)) & (df['PSYCHOTIC_DIS'] == 0) & (
+        df['ADHD'] == 0), 'diagnosis'] = 'ANX_MD'
+df.loc[(df['ANXIETY'] >= 0) & (df['DEPRESSION'] >= 0) & (df['MOOD_DIS'] >= 0) & (df['PSYCHOTIC_DIS'] == 0) & (
+        df['ADHD'] >= 1), 'diagnosis'] = 'ADHD'
+df.loc[(df['ANXIETY'] >= 0) & (df['DEPRESSION'] >= 0) & (df['MOOD_DIS'] >= 0) & (df['PSYCHOTIC_DIS'] >= 1) & (
+        df['ADHD'] >= 0), 'diagnosis'] = 'Psychosis'
+
+df.loc[(df['AGE_AT_ENC'].round(decimals=1) >= 12) & (df['AGE_AT_ENC'] < 14), 'enc_age_grp'] = '12-13.9'
+df.loc[(df['AGE_AT_ENC'] >= 14) & (df['AGE_AT_ENC'] < 16), 'enc_age_grp'] = '14-15.9'
+df.loc[(df['AGE_AT_ENC'] >= 16) & (df['AGE_AT_ENC'] < 18), 'enc_age_grp'] = '16-17.9'
+
+# sorting
+df = df.sort_values(by=['week_num', 'ENC_CONTACT'], ascending=True)
+
+# add covid column
+df.loc[(df['week_num'] < 62), 'intervention'] = 0
+df.loc[(df['week_num'] >= 62), 'intervention'] = 1
+
+# drop a duplicate row, based on column name
+df_dropped = df.drop_duplicates(subset='PAT_ENC_CSN_ID', keep='first')
+
+# get summary tables for encounters (PAT_ENC_CSN_ID) and patients (PAT_ID)
+df_encounters = df.drop_duplicates(subset='PAT_ENC_CSN_ID', keep='first')
+df_patients = df.drop_duplicates(subset='PAT_ID', keep='first')
+print('number of true encounters=', len(df_encounters))
+print('number of true patients=', len(df_patients))
+
+print("RACE ENCOUNTER COUNTS \n", df_encounters.stb.freq(['RACE']), " \n")
+df_encounters.stb.freq(['RACE']).to_csv('RACE ENCOUNTER COUNTS.csv', index=False)
+print("RACE PATIENTS COUNTS \n", df_patients.stb.freq(['RACE']), " \n")
+df_patients.stb.freq(['RACE']).to_csv('RACE PATIENTS COUNTS.csv', index=False)
+
+print("GENDER ENCOUNTER COUNTS \n", df_encounters.stb.freq(['GENDER']), " \n")
+df_encounters.stb.freq(['GENDER']).to_csv('GENDER ENCOUNTER COUNTS.csv', index=False)
+print("GENDER PATIENTS COUNTS \n", df_patients.stb.freq(['GENDER']), " \n")
+df_patients.stb.freq(['GENDER']).to_csv('GENDER PATIENTS COUNTS.csv', index=False)
+
+print("ENC_TYPE ENCOUNTER COUNTS \n", df_encounters.stb.freq(['ENC_TYPE']), " \n")
+df_encounters.stb.freq(['ENC_TYPE']).to_csv('ENC_TYPE ENCOUNTER COUNTS.csv', index=False)
+print("ENC_TYPE PATIENTS COUNTS \n", df_patients.stb.freq(['ENC_TYPE']), " \n")
+df_patients.stb.freq(['ENC_TYPE']).to_csv('ENC_TYPE PATIENTS COUNTS.csv', index=False)
+
+print("DX ENCOUNTER COUNTS \n", df_encounters.stb.freq(['diagnosis']), " \n")
+df_encounters.stb.freq(['diagnosis']).to_csv('DX ENCOUNTER COUNTS.csv', index=False)
+print("DX PATIENTS COUNTS \n", df_patients.stb.freq(['diagnosis']), " \n")
+df_patients.stb.freq(['diagnosis']).to_csv('DX PATIENTS COUNTS.csv', index=False)
+
+print("ENC_AGE ENCOUNTER COUNTS \n", df_encounters.stb.freq(['enc_age_grp']), " \n")
+df_encounters.stb.freq(['enc_age_grp']).to_csv('ENC AGE ENCOUNTER COUNTS.csv', index=False)
+print("ENC_AGE PATIENTS COUNTS \n", df_patients.stb.freq(['enc_age_grp']), " \n")
+df_patients.stb.freq(['enc_age_grp']).to_csv('ENC AGE PATIENTS COUNTS.csv', index=False)
+
+# create new dataframe by race, gender, type of visits, diagnosis
+df_white = df_dropped.loc[(df_dropped['RACE'] == 'White')]
+df_black = df_dropped.loc[(df_dropped['RACE'] == 'Black')]
+df_hispanic = df_dropped.loc[(df_dropped['RACE'] == 'Hispanic')]
+df_asian = df_dropped.loc[(df_dropped['RACE'] == 'Asian')]
+df_other_race = df_dropped.loc[(df_dropped['RACE'] == 'Other')]
+
+df_male = df_dropped.loc[(df_dropped['GENDER'] == 'Male')]
+df_female = df_dropped.loc[(df_dropped['GENDER'] == 'Female')]
+
+df_phone = df_dropped.loc[(df_dropped['ENC_TYPE'] == 'Telephone')]
+df_office = df_dropped.loc[(df_dropped['ENC_TYPE'] == 'Office Visit')]
+df_video = df_dropped.loc[(df_dropped['ENC_TYPE'] == 'Video Visit')]
+df_group = df_dropped.loc[(df_dropped['ENC_TYPE'] == 'Group Visit')]
+df_group_video = df_dropped.loc[(df_dropped['ENC_TYPE'] == 'Group Visit - Video')]
+
+df_anxiety = df_dropped.loc[(df_dropped['diagnosis'] == 'ANX_ONLY')]
+df_anx_md = df_dropped.loc[(df_dropped['diagnosis'] == 'ANX_MD')]
+df_md_only = df_dropped.loc[(df_dropped['diagnosis'] == 'MD_ONLY')]
+df_adhd = df_dropped.loc[(df_dropped['diagnosis'] == 'ADHD')]
+df_other_dx = df_dropped.loc[(df_dropped['diagnosis'] == 'Psychosis')]
+
+df_age1 = df_dropped.loc[(df_dropped['enc_age_grp'] == '12-13.9')]
+df_age2 = df_dropped.loc[(df_dropped['enc_age_grp'] == '14-15.9')]
+df_age3 = df_dropped.loc[(df_dropped['enc_age_grp'] == '16-17.9')]
+
+# find unique patient encounter csn ID after grouping by week number (no diff between df vs. df_dropped)
+# race
+sumPat_per_week = df_dropped.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_w = df_white.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_b = df_black.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_h = df_hispanic.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_a = df_asian.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_o = df_other_race.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+
+# gender
+sumPat_per_week_M = df_male.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_F = df_female.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+
+# visit types
+sumPat_per_week_phone = df_phone.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_video = df_video.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_grp_video = df_group_video.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_office = df_office.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_group = df_group.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+
+# mental disorder diagnosis
+sumPat_per_week_anxiety = df_anxiety.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_anx_md = df_anx_md.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_md_only = df_md_only.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_adhd = df_adhd.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_other = df_other_dx.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+
+# age at encounter
+sumPat_per_week_age_g1 = df_age1.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_age_g2 = df_age2.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+sumPat_per_week_age_g3 = df_age3.groupby('week_num')['PAT_ENC_CSN_ID'].nunique()
+
+# data, move here
+df_all_pres = pd.DataFrame()
+df_all_pres['NumPat'] = sumPat_per_week
+df_all_pres['NumPat_W'] = sumPat_per_week_w
+df_all_pres['NumPat_B'] = sumPat_per_week_b
+df_all_pres['NumPat_H'] = sumPat_per_week_h
+df_all_pres['NumPat_A'] = sumPat_per_week_a
+df_all_pres['NumPat_OtherRace'] = sumPat_per_week_o
+
+df_all_pres['NumPat_M'] = sumPat_per_week_M
+df_all_pres['NumPat_F'] = sumPat_per_week_F
+
+df_all_pres['NumPat_tel'] = sumPat_per_week_phone
+df_all_pres['NumPat_vid'] = sumPat_per_week_video
+df_all_pres['NumPat_grp'] = sumPat_per_week_group
+df_all_pres['NumPat_grpV'] = sumPat_per_week_grp_video
+df_all_pres['NumPat_off'] = sumPat_per_week_office
+
+df_all_pres['NumPat_anx'] = sumPat_per_week_anxiety
+df_all_pres['NumPat_amd'] = sumPat_per_week_anx_md
+df_all_pres['NumPat_adhd'] = sumPat_per_week_adhd
+df_all_pres['NumPat_md'] = sumPat_per_week_md_only
+df_all_pres['NumPat_OtherDX'] = sumPat_per_week_other
+
+df_all_pres['NumPat_g1'] = sumPat_per_week_age_g1
+df_all_pres['NumPat_g2'] = sumPat_per_week_age_g2
+df_all_pres['NumPat_g3'] = sumPat_per_week_age_g3
+
+# generate covariates for the model
+df_all_pres['Week'] = np.arange(len(df_all_pres)) + 1
+arr = np.zeros((len(df_all_pres),))
+arr[61:] = 1
+df_all_pres['Intervention'] = arr
+arr = np.zeros((len(df_all_pres),))
+arr[61:] = np.arange(len(df_all_pres) - 61) + 1
+df_all_pres['Intervention_week'] = arr
+
+# this is for plotting x-axis with dates
+start = datetime.datetime.strptime("01-02-2019", "%m-%d-%Y")
+end = datetime.datetime.strptime("12-30-2021", "%m-%d-%Y")
+df_all_pres['Date'] = pd.date_range(start, end, periods=156).strftime("%m-%d-%Y")
+df_all_pres['dates'] = [pd.to_datetime(d) for d in df_all_pres['Date']]
+
+# set parameters for plotting
+figure_size = (8, 6)
+dpi_size = 200
+# plt.rcParams.update({'font.size': 10})
+# plt.rcParams.update({'font.sans-serif': 'Helvetica'})
+plt.rcParams["font.size"] = "8"
+
+# plot saving directories
+script_dir = os.path.dirname(__file__)
+if val == 1:
+    results_dir = os.path.join(script_dir, 'Results/MHC/')
+else:
+    results_dir = os.path.join(script_dir, 'Results/MED/')
+
+if not os.path.isdir(results_dir):
+    os.makedirs(results_dir)
+
+# set start date for figure
+start = 61
+start_date = '03/01/2020'
+
+# race plot by week
+plt.figure(figsize=figure_size, dpi=dpi_size)
+sumPat_per_week_w.plot(label='White', color='green')
+sumPat_per_week_b.plot(label='Black', color='blue')
+sumPat_per_week_h.plot(label='Hispanic', color='orange')
+sumPat_per_week_a.plot(label='Asian', color='black')
+sumPat_per_week_o.plot(label='Other', color='magenta')
+plt.axvline(x=start, color='red')
+# plt.title('Race timeseries')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+plt.savefig(results_dir + 'race.tiff')
+
+# gender plot by week
+plt.figure(figsize=figure_size, dpi=dpi_size)
+sumPat_per_week_F.plot(label='Female', color='green')
+sumPat_per_week_M.plot(label='Male', color='blue')
+# plt.title('Gender timeseries')
+plt.axvline(x=start, color='red')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+plt.savefig(results_dir + 'gender.tiff')
+
+# gender plot by dates
+plt.figure(figsize=figure_size, dpi=dpi_size)
+sumPat_per_week_F.index = df_all_pres['dates'].loc[sumPat_per_week_F.index]
+sumPat_per_week_M.index = df_all_pres['dates'].loc[sumPat_per_week_M.index]
+sumPat_per_week_F.plot(label='Female', color='green')
+sumPat_per_week_M.plot(label='Male', color='blue')
+# plt.title('Gender timeseries')
+plt.axvline(x=start_date, color='red')
+plt.xlabel('Year/Month')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+plt.savefig(results_dir + 'gender_by_date.tiff')
+
+# visit type plot by week
+if val == 1:
+    plt.figure(figsize=figure_size, dpi=dpi_size)
+    sumPat_per_week_video.plot(label='Video visit', color='green')
+    sumPat_per_week_office.plot(label='In-person visit', color='blue')
+    sumPat_per_week_phone.plot(label='Telephone visit', color='orange')
+    sumPat_per_week_group.plot(label='Group visit', color='black')
+    sumPat_per_week_grp_video.plot(label='Group video visit', color='magenta')
+    # plt.title('Visit Type timeseries')
+    plt.axvline(x=start, color='red', label='Start of COVID-19')
+    plt.xlabel('Time (week)')
+    plt.ylabel('Number of patients')
+    plt.legend(loc='upper right')
+    plt.savefig(results_dir + 'visit_type.tiff')
+else:
+    plt.figure(figsize=figure_size, dpi=dpi_size)
+    sumPat_per_week_video.plot(label='Video visit', color='green')
+    sumPat_per_week_office.plot(label='In-person visit', color='blue')
+    sumPat_per_week_phone.plot(label='Telephone visit', color='orange')
+    # plt.title('Visit Type timeseries')
+    plt.axvline(x=start, color='red')
+    plt.xlabel('Time (week)')
+    plt.ylabel('Number of patients')
+    plt.legend(loc='upper right')
+    plt.savefig(results_dir + 'visit_type.tiff')
+
+# visit type plot by date
+if val == 1:
+    plt.figure(figsize=figure_size, dpi=dpi_size)
+    sumPat_per_week_video.index = df_all_pres['dates'].loc[sumPat_per_week_video.index]
+    sumPat_per_week_office.index = df_all_pres['dates'].loc[sumPat_per_week_office.index]
+    sumPat_per_week_phone.index = df_all_pres['dates'].loc[sumPat_per_week_phone.index]
+    sumPat_per_week_group.index = df_all_pres['dates'].loc[sumPat_per_week_group.index]
+    sumPat_per_week_grp_video.index = df_all_pres['dates'].loc[sumPat_per_week_grp_video.index]
+    sumPat_per_week_video.plot(label='Video Visit', color='green')
+    sumPat_per_week_office.plot(label='In-person Visit', color='blue')
+    sumPat_per_week_phone.plot(label='Telephone Visit', color='orange')
+    sumPat_per_week_group.plot(label='In-person Group Therapy Visit', color='black')
+    sumPat_per_week_grp_video.plot(label='Virtual Group Therapy Visit', color='magenta')
+    # plt.title('Visit Type timeseries')
+    plt.axvline(x=start_date, color='red', label='Start of COVID-19')
+    plt.xlabel('Year-Month')
+    plt.ylabel('Number of patients')
+    plt.legend(loc='upper right')
+    plt.savefig(results_dir + 'visit_type_by_date.tiff')
+else:
+    plt.figure(figsize=figure_size, dpi=dpi_size)
+    sumPat_per_week_video.plot(label='Video Visit', color='green')
+    sumPat_per_week_office.plot(label='In-person Visit', color='blue')
+    sumPat_per_week_phone.plot(label='Telephone Visit', color='orange')
+    # plt.title('Visit Type timeseries')
+    plt.axvline(x=start, color='red')
+    plt.xlabel('Time (week)')
+    plt.ylabel('Number of patients')
+    plt.legend(loc='upper right')
+    plt.savefig(results_dir + 'visit_type.tiff')
+
+# mental disorder plot by week
+plt.figure(figsize=figure_size, dpi=dpi_size)
+sumPat_per_week_md_only.plot(label='Mood Disorder alone', color='green')
+sumPat_per_week_adhd.plot(label='ADHD alone or with anxiety/mood disorder', color='blue')
+sumPat_per_week_anx_md.plot(label='Anxiety & Mood Disorder', color='orange')
+sumPat_per_week_anxiety.plot(label='Anxiety alone', color='black')
+sumPat_per_week_other.plot(label='Psychosis alone or with others', color='magenta')
+
+# plt.title('mental dx timeseries')
+plt.axvline(x=start, color='red')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+plt.savefig(results_dir + 'dx.tiff')
+
+# encounter age by week
+plt.figure(figsize=figure_size, dpi=dpi_size)
+sumPat_per_week_age_g3.plot(label='Age 16-17.9', color='green')
+sumPat_per_week_age_g2.plot(label='Age 14-15.9', color='blue')
+sumPat_per_week_age_g1.plot(label='Age 12-13.9', color='orange')
+
+# plt.title('encounter age timeseries')
+plt.axvline(x=start, color='red')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+plt.savefig(results_dir + 'age.tiff')
+
+# naive solution with OLS regression
+model = smf.ols(formula='NumPat ~ Week + Intervention + Intervention_week', data=df_all_pres)
+res = model.fit()
+print(res.summary())
+
+# How the model fits before and after the intervention and projected counterfactual
+# start 62nd week, end 156th week
+start = 61
+end = 156
+beta = res.params
+
+# get model predictions and 95% CI
+predictions = res.get_prediction(df_all_pres)
+summary = predictions.summary_frame(alpha=0.05)
+
+# mean predictions
+y_pred = predictions.predicted_mean
+
+# counterfactual (cf) assumes no interventions
+cf_df_all_pres = df_all_pres.copy()
+cf_df_all_pres['Intervention'] = 0
+cf_df_all_pres['Intervention_week'] = 0
+
+# counterfactual predictions
+cf = res.get_prediction(cf_df_all_pres).summary_frame(alpha=0.05)
+
+# plotting
+plt.style.use('seaborn-whitegrid')
+fig, ax = plt.subplots(figsize=figure_size)
+
+# plt.title('mental dx timeseries')
+plt.axvline(x=62, color='red')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.legend(loc='upper right')
+
+# plot raw data
+ax.scatter(df_all_pres['Week'], df_all_pres['NumPat'], facecolors='none', edgecolors='steelblue',
+           label='Number of patients weekly', linewidths=2)
+
+# plot model mean numPat prediction
+ax.plot(df_all_pres['Week'][:start], y_pred[:start], 'b-', label='Model prediction')
+ax.plot(df_all_pres['Week'][start:], y_pred[start:], 'b-')
+
+# plot counterfactual mean numPat with 95% CI
+ax.plot(df_all_pres['Week'][start:], cf['mean'][start:], 'k.', label='Counterfactual')
+ax.fill_between(df_all_pres['Week'][start:], cf['mean_ci_lower'][start:], cf['mean_ci_upper'][start:], color='k',
+                alpha=0.1, label='Counterfactual 95% CI')
+
+# plot line marking intervention moment
+plt.title('OLS Regression ITS Analysis')
+ax.axvline(x=start, color='r', label='Covid-19 started')
+ax.legend(loc='best')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.savefig(results_dir + 'OLS.tiff', dpi=dpi_size)
+
+# plot the autocorrelation plot (x-axis = lag, y-axis=correlation coef)
+plot_acf(df_all_pres['NumPat'], lags=40, alpha=0.025)
+plot_pacf(df_all_pres['NumPat'], lags=40, alpha=0.025)
+plt.savefig(results_dir + 'autocorrelation.tiff', dpi=dpi_size)
+
+# plot the decomposition graph (trend, seasonal, residual).  Frequency: 1 month ~ 4 timepoints
+decompose = seasonal_decompose(df_all_pres['NumPat'], model='additive', period=4)
+decompose.plot()
+plt.savefig(results_dir + 'decomposition.tiff', dpi=dpi_size, )
+
+# use auto_arima to find best model: ARIMA(p,d,q)(0,0,0)[0] intercept
+model = pm.auto_arima(df_all_pres['NumPat'], df_all_pres[['Week', 'Intervention', 'Intervention_week']], start_p=1,
+                      start_q=1,
+                      test='adf',  # use adftest to find optimal 'd'
+                      max_p=3, max_q=3,  # maximum p and q
+                      m=1,  # frequency of series
+                      d=None,  # let model determine 'd'
+                      seasonal=False,  # No Seasonality
+                      start_P=0,
+                      D=0,
+                      trace=True,
+                      error_action='ignore',
+                      suppress_warnings=True,
+                      stepwise=True)
+
+print(model.summary())
+
+# if data requires transformation (optional)
+transform = 0
+if transform == 0:
+    print('no data transformation')
+else:
+    # log transformation
+    from numpy import log
+
+    df_all_pres['vid_transform_log'] = log(df_all_pres['NumPat_vid'])
+    plt.plot(df_all_pres['vid_transform_log'])
+
+    df_all_pres['off_transform_log'] = log(df_all_pres['NumPat_off'].fillna(0))
+    plt.plot(df_all_pres['off_transform_log'])
+
+    # box-cox transformation
+    from scipy.stats import boxcox
+
+    df_all_pres['vid_transform_box'], lam = boxcox(df_all_pres['NumPat_vid'])
+    print('Lambda: %f' % lam)
+    plt.plot(df_all_pres['vid_transform_box'])
+
+    df_all_pres['off_transform_box'], lam = boxcox(df_all_pres['NumPat_off'].fillna(0.1))
+    print('Lambda: %f' % lam)
+    plt.plot(df_all_pres['off_transform_box'])
+
+# Other model fitting if ARIMA is not suitable
+# poisson regression model (used for counts data with no neg values, looks like exponential model, assume mean=variance)
+other_models = 0
+if other_models == 1:
+
+    from patsy import dmatrices
+    y, X = dmatrices('NumPat_off ~ Week + Intervention + Intervention_week', data=df_all_pres, return_type='dataframe')
+    poisson_results = sm.GLM(y, X, family=sm.families.Poisson()).fit()
+    print(poisson_results.summary())
+
+    print(poisson_results.mu)
+    df_all_pres['NumPat_off_lambda'] = poisson_results.mu
+    df_all_pres['AUX_OLS_DEP'] = df_all_pres.apply(lambda x: ((x['NumPat_off'] - x['NumPat_off_lambda']) ** 2 - x['NumPat_off_lambda']) / x['NumPat_off_lambda'],axis=1)
+    ols_expr = """AUX_OLS_DEP ~ NumPat_off_lambda - 1"""
+    aux_olsr_results = smf.ols(ols_expr, df_all_pres).fit()
+    print(aux_olsr_results.params)
+
+    # lambda is the dispersion parameter (the unexpected degree of variance in Y)
+    import scipy.stats
+
+    crit_t_value = scipy.stats.t.ppf(q=1 - .05, df=155)
+    if aux_olsr_results.tvalues.values[0] > crit_t_value:
+        print('lambda is significant')
+    else:
+        print('lambda is not significant, mean = variance')
+
+    # checking over or under dispersion (variance>mean = over-dispersion)
+    print('variance=' + str(df_all_pres['NumPat_off'].var()))
+    print('mean=' + str(df_all_pres['NumPat_off'].mean()))
+else: print('no other models run')
+
+# Generalized Poison regression model for dispersion issue (mean~!variance)
+run = 0
+if run == 1:
+    # Consul’s Generalized Poison regression model, know as GP-1:
+    gen_poisson_gp1_results = sm.GeneralizedPoisson(y, X, p=1).fit()
+    print(gen_poisson_gp1_results.summary())
+
+    # Famoye’s Restricted Generalized Poisson regression model, known as GP-2:
+    gen_poisson_gp2_results = sm.GeneralizedPoisson(y, X, p=2).fit()
+    print(gen_poisson_gp2_results.summary())
+else:
+    print('no poisson models run')
+
+# Negative Binominal (one parameter for mean and one for variance)
+if run == 1:
+    import statsmodels.discrete.discrete_model as dm
+
+    nb2_model_results = dm.NegativeBinomial(endog=y, exog=X, loglike_method='nb2').fit(maxiter=100)
+    print(nb2_model_results.summary())
+else:
+    print('no neg binominal models run')
+
+# plot the autocorrelation plot to find number of lags (x-axis = lag, y-axis=correlation coef)
+plot_pacf(df_all_pres['NumPat_vid'], lags=40, alpha=0.025)
+
+# GLM
+GLM = 0
+if GLM == 1:
+
+    from statsmodels.formula.api import glm
+
+    model = glm(formula='NumPat_vid ~ Week + Intervention + Intervention_week', data=df_all_pres,
+                family=sm.families.Poisson())
+    res = model.fit()
+    print(res.summary())
+
+    from statsmodels.formula.api import glm
+
+    model = glm(formula='NumPat_off ~ Week + Intervention + Intervention_week', data=df_all_pres,
+                family=sm.families.Poisson())
+    res = model.fit()
+    print(res.summary())
+else: print('no GLM model runs')
+
+# SARIMA model (auto_arima uses) vs. ARIMA model (with constant)
+arima_sarima_results = sm.tsa.statespace.SARIMAX(df_all_pres['NumPat'],
+                                                 df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                                                 order=model.order).fit()
+print(arima_sarima_results.summary())
+
+arima_results = ARIMA(df_all_pres['NumPat'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                      order=model.order).fit()
+print(arima_results.summary())
+
+# stratified analysis
+# Arima Race
+arima_results_W = ARIMA(df_all_pres['NumPat_W'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_W.summary())
+
+arima_results_B = ARIMA(df_all_pres['NumPat_B'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_B.summary())
+
+arima_results_H = ARIMA(df_all_pres['NumPat_H'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_H.summary())
+arima_results_A = ARIMA(df_all_pres['NumPat_A'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_A.summary())
+arima_results_OtherRace = ARIMA(df_all_pres['NumPat_OtherRace'],
+                                df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                                order=model.order).fit()
+print(arima_results_OtherRace.summary())
+
+# Arima Gender
+arima_results_M = ARIMA(df_all_pres['NumPat_M'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_M.summary())
+
+arima_results_F = ARIMA(df_all_pres['NumPat_F'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                        order=model.order).fit()
+print(arima_results_F.summary())
+
+# Arima Visit Types
+arima_results_phone = ARIMA(df_all_pres['NumPat_tel'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                            order=model.order).fit()
+print(arima_results_phone.summary())
+
+arima_results_office = ARIMA(df_all_pres['NumPat_off'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                             order=model.order).fit()
+print(arima_results_office.summary())
+
+arima_results_group = ARIMA(df_all_pres['NumPat_grp'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                            order=model.order).fit()
+print(arima_results_group.summary())
+
+arima_results_grpV = ARIMA(df_all_pres['NumPat_grpV'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                           order=model.order).fit()
+print(arima_results_grpV.summary())
+
+arima_results_vid = ARIMA(df_all_pres['NumPat_vid'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                          order=model.order).fit()
+print(arima_results_vid.summary())
+
+# arima_results_vid_box = ARIMA(df_all_pres['vid_transform_box'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+#                           order=model.order).fit()
+# print(arima_results_vid_box.summary())
+
+# arima_results_vid_log = ARIMA(df_all_pres['vid_transform_log'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+#                           order=model.order).fit()
+# print(arima_results_vid_log.summary())
+
+# this is how you get the heteroskedasticity:
+arima_results_vid.test_heteroskedasticity(method='breakvar', alternative='two-sided', use_f=True)
+
+# Plot residual errors
+residuals = pd.DataFrame(arima_results_vid.resid)
+fig, ax = plt.subplots(1,2)
+residuals.plot(title="Residuals", ax=ax[0])
+residuals.plot(kind='kde', title='Density', ax=ax[1])
+plt.show()
+
+# ARIMA DX
+arima_results_anx = ARIMA(df_all_pres['NumPat_anx'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                          order=model.order).fit()
+print(arima_results_anx.summary())
+
+arima_results_amd = ARIMA(df_all_pres['NumPat_amd'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                          order=model.order).fit()
+print(arima_results_amd.summary())
+
+arima_results_mood = ARIMA(df_all_pres['NumPat_md'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                           order=model.order).fit()
+print(arima_results_mood.summary())
+
+arima_results_adhd = ARIMA(df_all_pres['NumPat_adhd'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                           order=model.order).fit()
+print(arima_results_adhd.summary())
+arima_results_otherDX = ARIMA(df_all_pres['NumPat_OtherDX'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                              order=model.order).fit()
+print(arima_results_otherDX.summary())
+
+# ARIMA AGE
+arima_results_g1 = ARIMA(df_all_pres['NumPat_g1'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                         order=model.order).fit()
+print(arima_results_g1.summary())
+arima_results_g2 = ARIMA(df_all_pres['NumPat_g2'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                         order=model.order).fit()
+print(arima_results_g2.summary())
+arima_results_g3 = ARIMA(df_all_pres['NumPat_g3'], df_all_pres[['Week', 'Intervention', 'Intervention_week']],
+                         order=model.order).fit()
+print(arima_results_g3.summary())
+
+# plotting based on Arima result (x-axis = weeks)
+start = 61
+end = 156
+
+# get model predictions and 95% CI
+predictions = arima_results.get_prediction(0, end - 1)
+summary = predictions.summary_frame(alpha=0.05)
+
+arima_cf = ARIMA(df_all_pres['NumPat'][:start], df_all_pres['Week'][:start], order=model.order).fit()
+
+# mean predictions
+y_pred = predictions.predicted_mean
+
+# counterfactual mean and 95% confidence interval
+y_cf = arima_cf.get_forecast(end - start, exog=df_all_pres['Week'][start:]).summary_frame(alpha=0.05)
+
+# plot section
+plt.style.use('seaborn-whitegrid')
+fig, ax = plt.subplots(figsize=figure_size)
+
+# plot raw data
+ax.scatter(df_all_pres['Week'], df_all_pres['NumPat'], facecolors='none', edgecolors='steelblue',
+           label='Number of patients weekly', linewidths=2)
+
+# plot model mean numPat prediction
+ax.plot(df_all_pres['Week'][:start], y_pred[:start], 'b-', label='Model prediction')
+ax.plot(df_all_pres['Week'][start:], y_pred[start:], 'b-')
+
+# plot counterfactual mean numPat with 95% CI
+ax.plot(df_all_pres['Week'][start:], y_cf['mean'], 'k.', label='Counterfactual')
+ax.fill_between(df_all_pres['Week'][start:], y_cf['mean_ci_lower'], y_cf['mean_ci_upper'], color='k', alpha=0.1,
+                label='Counterfactual 95% CI')
+
+# plot line marking intervention moment
+# plt.title('ARIMA ITS Analysis')
+ax.axvline(x=62, color='r', label='Covid-19 started')
+ax.legend(loc='best')
+plt.xlabel('Time (week)')
+plt.ylabel('Number of patients')
+plt.savefig(results_dir + 'arima_weeks.tiff', dpi=dpi_size)
+
+# plotting based on Arima result (x-axis = dates)
+start = 61
+end = 156
+
+# get model predictions and 95% CI
+predictions = arima_results.get_prediction(0, end - 1)
+summary = predictions.summary_frame(alpha=0.05)
+
+arima_cf = ARIMA(df_all_pres['NumPat'][:start], df_all_pres['Week'][:start], order=model.order).fit()
+
+# mean predictions
+y_pred = predictions.predicted_mean
+
+# counterfactual mean and 95% confidence interval
+y_cf = arima_cf.get_forecast(end - start, exog=df_all_pres['Week'][start:]).summary_frame(alpha=0.05)
+
+# plot section (white background with grid)
+plt.style.use('seaborn-whitegrid')
+fig, ax = plt.subplots(figsize=figure_size)
+
+# plot raw data (hollow dots that represent data points)
+ax.scatter(df_all_pres['dates'], df_all_pres['NumPat'], facecolors='none', edgecolors='steelblue',
+           label='Number of patients weekly', linewidths=2)
+
+# plot model mean numPat prediction (the fitting curve)
+ax.plot(df_all_pres['dates'][:start], y_pred[:start], 'b-', label='Model prediction')
+ax.plot(df_all_pres['dates'][start:], y_pred[start:], 'b-')
+
+# plot counterfactual mean numPat with 95% CI (the CI gray area)
+ax.plot(df_all_pres['dates'][start:], y_cf['mean'], 'k.', label='Counterfactual')
+ax.fill_between(df_all_pres['dates'][start:], y_cf['mean_ci_lower'], y_cf['mean_ci_upper'], color='k', alpha=0.1,
+                label='Counterfactual 95% CI')
+
+# plot line marking intervention moment (labels and title)
+# plt.title('ARIMA ITS Analysis')
+fig.autofmt_xdate()
+# ax.xaxis.set_major_locator(mdates.MonthLocator([1, 3, 5, 7, 9, 11, 1]))
+# ax.set_xlim([datetime.date(2018, 12, 1), datetime.date(2022, 1, 30)])
+# ax.xaxis.set_major_formatter(mdates.DateFormatter('%b-%Y'))
+ax.axvline(x=df_all_pres.iloc[start, -1], color='r', label='Start of COVID-19')
+# ax.axvline(x='03/01/2020', color='r', label='Start of COVID-19')
+ax.legend(loc='upper right')
+plt.xlabel('Year-Month')
+plt.ylabel('Number of patients')
+plt.savefig(results_dir + 'arima_by_date.tiff', dpi=dpi_size)
+
+# plotting autocorrelation residual
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figure_size)
+sm.qqplot(res.resid, sp.stats.t, fit=True, line="45", ax=ax1)
+ax1.set_title("OLS qqplot")
+sm.qqplot(arima_results.resid, sp.stats.t, fit=True, line="45", ax=ax2)
+ax2.set_title("ARIMA qqplot")
+plt.savefig(results_dir + 'qqplot.tiff', dpi=dpi_size)
+plt.show()
+
+# making table
+table_df = pd.DataFrame({'value': arima_results.params[:4], 'p-value': arima_results.pvalues[:4],
+                         'value_off': arima_results_office.params[:4], 'p-value_off': arima_results_office.pvalues[:4],
+                         'value_phone': arima_results_phone.params[:4],
+                         'p-value_phone': arima_results_phone.pvalues[:4],
+                         'value_vid': arima_results_vid.params[:4], 'p-value_vid': arima_results_vid.pvalues[:4],
+                         'value_group': arima_results_group.params[:4],
+                         'p-value_group': arima_results_group.pvalues[:4],
+                         'value_males': arima_results_M.params[:4], 'p-value_males': arima_results_M.pvalues[:4],
+                         'value_females': arima_results_F.params[:4], 'p-value_females': arima_results_F.pvalues[:4],
+                         'value_g1': arima_results_g1.params[:4], 'p-value_g1': arima_results_g1.pvalues[:4],
+                         'value_g2': arima_results_g2.params[:4], 'p-value_g2': arima_results_g2.pvalues[:4],
+                         'value_g3': arima_results_g3.params[:4], 'p-value_g3': arima_results_g3.pvalues[:4],
+                         'value_mood': arima_results_mood.params[:4], 'p-value_mood': arima_results_mood.pvalues[:4],
+                         'value_anx': arima_results_anx.params[:4], 'p-value_anx': arima_results_anx.pvalues[:4],
+                         'value_amd': arima_results_amd.params[:4], 'p-value_amd': arima_results_amd.pvalues[:4],
+                         'value_adhd': arima_results_adhd.params[:4], 'p-value_adhd': arima_results_adhd.pvalues[:4],
+                         'value_psychosis': arima_results_otherDX.params[:4],
+                         'p-value_psychosis': arima_results_otherDX.pvalues[:4],
+                         'value_white': arima_results_W.params[:4], 'p-value_white': arima_results_W.pvalues[:4],
+                         'value_black': arima_results_B.params[:4], 'p-value_black': arima_results_B.pvalues[:4],
+                         'value_hispanic': arima_results_H.params[:4], 'p-value_hispanic': arima_results_H.pvalues[:4],
+                         'value_asian': arima_results_A.params[:4], 'p-value_asian': arima_results_A.pvalues[:4],
+                         'value_OtherRace': arima_results_OtherRace.params[:4],
+                         'p-value_OtherRace': arima_results_OtherRace.pvalues[:4]
+                         })
+table_df.to_csv('arima_table_visits.csv')
+
+# making table with confidence interval
+table_df_ci = pd.DataFrame({'value': arima_results.params[:4], 'p-value': arima_results.pvalues[:4], 'con_int_0.025': arima_results.conf_int().iloc[0:4,0], 'con_int_0.975': arima_results.conf_int().iloc[0:4,1],
+                         'value_off': arima_results_office.params[:4], 'p-value_off': arima_results_office.pvalues[:4], 'con_int_off_0.025': arima_results_office.conf_int().iloc[0:4,0], 'con_int_off_0.975': arima_results_office.conf_int().iloc[0:4,1],
+                         'value_phone': arima_results_phone.params[:4], 'p-value_phone': arima_results_phone.pvalues[:4], 'con_int_phone_0.025': arima_results_phone.conf_int().iloc[0:4,0], 'con_int_phone_0.975': arima_results_phone.conf_int().iloc[0:4,1],
+                         'value_vid': arima_results_vid.params[:4], 'p-value_vid': arima_results_vid.pvalues[:4], 'con_int_vid_0.025': arima_results_vid.conf_int().iloc[0:4,0], 'con_int_vid_0.975': arima_results_vid.conf_int().iloc[0:4,1],
+                         'value_group': arima_results_group.params[:4], 'p-value_group': arima_results_group.pvalues[:4], 'con_int_group_0.025': arima_results_group.conf_int().iloc[0:4,0], 'con_int_group_0.975': arima_results_group.conf_int().iloc[0:4,1],
+                         'value_males': arima_results_M.params[:4], 'p-value_males': arima_results_M.pvalues[:4], 'con_int_males_0.025': arima_results_M.conf_int().iloc[0:4,0], 'con_int_males_0.975': arima_results_M.conf_int().iloc[0:4,1],
+                         'value_females': arima_results_F.params[:4], 'p-value_females': arima_results_F.pvalues[:4], 'con_int_females_0.025': arima_results_F.conf_int().iloc[0:4,0], 'con_int_females_0.975': arima_results_F.conf_int().iloc[0:4,1],
+                         'value_g1': arima_results_g1.params[:4], 'p-value_g1': arima_results_g1.pvalues[:4], 'con_int_g1_0.025': arima_results_g1.conf_int().iloc[0:4,0], 'con_int_g1_0.975': arima_results_g1.conf_int().iloc[0:4,1],
+                         'value_g2': arima_results_g2.params[:4], 'p-value_g2': arima_results_g2.pvalues[:4], 'con_int_g2_0.025': arima_results_g2.conf_int().iloc[0:4,0], 'con_int_g2_0.975': arima_results_g2.conf_int().iloc[0:4,1],
+                         'value_g3': arima_results_g3.params[:4], 'p-value_g3': arima_results_g3.pvalues[:4], 'con_int_g3_0.025': arima_results_g3.conf_int().iloc[0:4,0], 'con_int_g3_0.975': arima_results_g3.conf_int().iloc[0:4,1],
+                         'value_mood': arima_results_mood.params[:4], 'p-value_mood': arima_results_mood.pvalues[:4], 'con_int_mood_0.025': arima_results_mood.conf_int().iloc[0:4,0], 'con_int_mood_0.975': arima_results_mood.conf_int().iloc[0:4,1],
+                         'value_anx': arima_results_anx.params[:4], 'p-value_anx': arima_results_anx.pvalues[:4], 'con_int_anx_0.025': arima_results_anx.conf_int().iloc[0:4,0], 'con_int_anx_0.975': arima_results_anx.conf_int().iloc[0:4,1],
+                         'value_amd': arima_results_amd.params[:4], 'p-value_amd': arima_results_amd.pvalues[:4], 'con_int_amd_0.025': arima_results_amd.conf_int().iloc[0:4,0], 'con_int_amd_0.975': arima_results_amd.conf_int().iloc[0:4,1],
+                         'value_adhd': arima_results_adhd.params[:4], 'p-value_adhd': arima_results_adhd.pvalues[:4], 'con_int_adhd_0.025': arima_results_adhd.conf_int().iloc[0:4,0], 'con_int_adhd_0.975': arima_results_adhd.conf_int().iloc[0:4,1],
+                         'value_psychosis': arima_results_otherDX.params[:4], 'p-value_psychosis': arima_results_otherDX.pvalues[:4], 'con_int_psychosis_0.025': arima_results_otherDX.conf_int().iloc[0:4,0], 'con_int_psychosis_0.975': arima_results_otherDX.conf_int().iloc[0:4,1],
+                         'value_white': arima_results_W.params[:4], 'p-value_white': arima_results_W.pvalues[:4], 'con_int_white_0.025': arima_results_W.conf_int().iloc[0:4,0], 'con_int_white_0.975': arima_results_W.conf_int().iloc[0:4,1],
+                         'value_black': arima_results_B.params[:4], 'p-value_black': arima_results_B.pvalues[:4], 'con_int_black_0.025': arima_results_B.conf_int().iloc[0:4,0], 'con_int_black_0.975': arima_results_B.conf_int().iloc[0:4,1],
+                         'value_hispanic': arima_results_H.params[:4], 'p-value_hispanic': arima_results_H.pvalues[:4], 'con_int_hispanic_0.025': arima_results_H.conf_int().iloc[0:4,0], 'con_int_hispanic_0.975': arima_results_H.conf_int().iloc[0:4,1],
+                         'value_asian': arima_results_A.params[:4], 'p-value_asian': arima_results_A.pvalues[:4], 'con_int_asian_0.025': arima_results_A.conf_int().iloc[0:4,0],  'con_int_asian_0.975': arima_results_A.conf_int().iloc[0:4,1],
+                         'value_OtherRace': arima_results_OtherRace.params[:4], 'p-value_OtherRace': arima_results_OtherRace.pvalues[:4], 'con_int_OtherRace_0.025': arima_results_OtherRace.conf_int().iloc[0:4,0], 'con_int_OtherRace_0.975': arima_results_OtherRace.conf_int().iloc[0:4,1]
+                         })
+table_df_ci.to_csv('arima_table_visits_with_CI.csv')
+
+if val == 1:
+    table_df.to_csv('arima_table_visits.csv')
+    table_df_ci.to_csv('arima_table_visits_with_CI.csv')
+else:
+    table_df.to_csv('arima_table_pres.csv')
+    table_df_ci.to_csv('arima_table_pres_with_CI.csv')
